@@ -1,7 +1,7 @@
 # =============================================================================
 # Text Cleaning Pipeline — 远端异步文本清洗流水线
 # =============================================================================
-# 触发条件：当 01_Drafts 目录下的 .md 草稿被 push 时自动执行。
+# 触发条件：当 novel_workspace/02_Drafts 目录下的 .md 草稿被 push 时自动执行。
 #           当 02_Config 目录下的 .yaml 配置被修改时也会触发（规则变更需重新清洗）。
 #
 # 流水线职责：
@@ -19,12 +19,12 @@
 name: Text Cleaning Pipeline
 
 # ---------------------------------------------------------------------------
-# 1. TRIGGER — 监听 01_Drafts 目录下 Markdown 文件的 push 事件
+# 1. TRIGGER — 监听 novel_workspace/02_Drafts 目录下 Markdown 文件的 push 事件
 # ---------------------------------------------------------------------------
 on:
   push:
     paths:
-      - "01_Drafts/**/*.md"
+      - "novel_workspace/02_Drafts/**/*.md"
       - "02_Config/**/*.yaml"
 
 # ---------------------------------------------------------------------------
@@ -87,11 +87,11 @@ jobs:
 
           # 使用 git diff 获取 HEAD 与前一提交之间变更的 .md 文件
           # 若 push 前没有父提交（如首次提交），则回退至与 origin/main 的差异
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep '^01_Drafts/.*\.md$' || true)
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep '^novel_workspace/02_Drafts/.*\.md$' || true)
 
           if [ -z "$CHANGED_FILES" ]; then
             echo "[INFO] 未检测到 HEAD~1 差异，尝试与默认分支对比..."
-            CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep '^01_Drafts/.*\.md$' || true)
+            CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep '^novel_workspace/02_Drafts/.*\.md$' || true)
           fi
 
           if [ -z "$CHANGED_FILES" ]; then
