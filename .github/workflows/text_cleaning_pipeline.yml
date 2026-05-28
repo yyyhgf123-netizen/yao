@@ -148,30 +148,11 @@ jobs:
       # -------------------------------------------------------------------
       # 6. AUTOMATED PR — 自动创建 Pull Request 供人工审查
       # -------------------------------------------------------------------
-      # 基于 peter-evans/create-pull-request 自动提交清洗后的变更并创建 PR。
-      #
-      # 工作原理：
-      #   - Step 5 中 clean_text.py 已对草稿文件原地覆写
-      #   - 此 Action 自动检测工作区的所有文件变更（即清洗产生的差异）
-      #   - 将变更推送到一个独立的分支（auto-clean-<run_id>）
-      #   - 向源分支发起 Pull Request，等待人工审查合并
-      #
-      # 若清洗未产生任何文件变更（模型返回文本与原文完全一致），
-      # 则 Action 自动跳过 PR 创建，不会产生空 PR。
-      # -------------------------------------------------------------------
       - name: "Create Automated Pull Request"
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "chore: auto-clean novel text"
           title: "[Auto-Clean] 章节文本规范化重构"
-          body: |
-            系统已依照 `02_Config` 中的规则对草稿进行了净化，请人工复核。
-
-            **清洗依据**：
-            - `blacklist.yaml` — AI 色彩词汇 & 陈词滥调过滤
-            - `characters.yaml` — 角色语言风格 & 行为边界校验
-            - `format.yaml` — 排版规范 & 英式拼写纠正
-
-            > 请逐条审查 diff，确认无误后合并。
+          body: "系统已依照 02_Config 中的规则对草稿进行了净化，请人工复核。"
           branch: "auto-clean-${{ github.run_id }}"
           delete-branch: true
