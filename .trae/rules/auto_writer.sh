@@ -1,247 +1,266 @@
 #!/bin/bash
-# =============================================================================
-# auto_writer.sh — 全自动小说写作闭环脚本
-# =============================================================================
-# 触发方式：在终端执行 ./auto_writer.sh
-# 前置依赖：git, GitHub CLI (gh)
-#
-# 流程：
-#   Step 1 → git add . + git commit + git push
-#   Step 2 → 循环嗅探 GitHub Actions 流水线状态，等待完成
-#   Step 3 → 查找流水线创建的 PR，自动 squash 合并
-#   Step 4 → git pull origin main，更新本地仓库
-#   Step 5 → 打印最新定稿内容供预览
-# =============================================================================
-
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-BRANCH="main"
-MAX_POLL_ATTEMPTS=60
-POLL_INTERVAL=30
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WS_DIR="$REPO_ROOT/novel_workspace"
 
-cd "$REPO_DIR"
+STATE_FILE="$WS_DIR/01_State/current_status.json"
+KNOWLEDGE_DIR="$WS_DIR/00_Knowledge"
+DIRECTOR_NOTES="$WS_DIR/scripts/director_notes.txt"
+DRAFTS_DIR="$WS_DIR/02_Drafts"
+ENV_FILE="$WS_DIR/scripts/.env"
+
+DEEPSEEK_API_URL="https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODEL="deepseek-chat"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+log_info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+log_warn()  { echo -e "${RED}[WARN]${NC} $*"; }
+log_title() { echo -e "${CYAN}$*${NC}"; }
 
 # ---------------------------------------------------------------------------
-# 检查前置依赖
+# 加载环境变量（API Key）
 # ---------------------------------------------------------------------------
-check_prerequisites() {
-    if ! command -v gh &> /dev/null; then
-        echo "[ERROR] GitHub CLI (gh) 未安装。"
-        echo "       请执行: winget install --id GitHub.cli"
-        echo "       或访问: https://cli.github.com/"
-        exit 1
+load_env() {
+    if [ -f "$ENV_FILE" ]; then
+        set -a
+        source "$ENV_FILE"
+        set +a
     fi
-
-    if ! gh auth status &> /dev/null; then
-        echo "[ERROR] GitHub CLI 未登录。请执行: gh auth login"
+    if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+        log_warn "DEEPSEEK_API_KEY 未设置，请检查 $ENV_FILE"
         exit 1
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Step 1 — 自动推送
+# 读取当前写作状态
 # ---------------------------------------------------------------------------
-auto_push() {
-    echo "============================================================"
-    echo "  Step 1/5 — 自动提交 & 推送"
-    echo "============================================================"
+read_state() {
+    local chapter
+    local protag_name
+    local protag_state
+    local protag_loc
+    local recent_events
+    local unresolved
 
-    if ! git diff --quiet || ! git diff --cached --quiet; then
-        git add .
-        TIMESTAMP=$(date "+%Y-%m-%d %H:%M")
-        git commit -m "auto: ${TIMESTAMP}"
-        echo "[INFO] 已提交本地变更。"
+    chapter=$(jq -r '.current_chapter_to_write // .current_chapter' "$STATE_FILE")
+    protag_name=$(jq -r '.protagonist.name' "$STATE_FILE")
+    protag_state=$(jq -r '.protagonist.physical_state' "$STATE_FILE")
+    protag_loc=$(jq -r '.protagonist.location' "$STATE_FILE")
+    recent_events=$(jq -r '.recent_events | join("\n")' "$STATE_FILE")
+    unresolved=$(jq -r '.unresolved_threads | join("\n")' "$STATE_FILE")
+
+    CHAPTER_NUM="$chapter"
+    PROTAG_NAME="$protag_name"
+    PROTAG_STATE="$protag_state"
+    PROTAG_LOC="$protag_loc"
+    RECENT_EVENTS="$recent_events"
+    UNRESOLVED="$unresolved"
+}
+
+# ---------------------------------------------------------------------------
+# 组装 System Prompt
+# ---------------------------------------------------------------------------
+build_system_prompt() {
+    cat << 'PROMPT_EOF'
+你是一位专业的小说作者。
+请严格遵循以下创作准则：
+1. 禁用一切AI陈词滥调，包括但不限于"仿佛在诉说""命运的齿轮""心中涌起一股暖流"等。
+2. 用具体的感官细节（视觉、听觉、触觉、嗅觉）和动作来暗示情绪，绝对不要直接描述情绪。
+3. 对话必须短促、口语化，不同角色要有明显不同的说话习惯和语气词，禁止用对话交代背景信息。
+4. 行文节奏紧凑，段落不超过4行，避免大段心理描写。
+5. 允许句式不完美、有瑕疵，追求真实的手感，像人类讲述，不要过于工整。
+6. 严格符合人物设定，不允许OOC。
+7. 本文是都市校园小甜文，尽量写的甜蜜一些。
+8. 绝对禁止在小说正文中使用英文字母、英文单词或英文标点，必须是100%纯中文。
+PROMPT_EOF
+}
+
+# ---------------------------------------------------------------------------
+# 组装 User Prompt（草稿上下文）
+# ---------------------------------------------------------------------------
+build_user_prompt() {
+    local chapter="$1"
+    local protag_name="$2"
+    local protag_state="$3"
+    local protag_loc="$4"
+    local recent_events="$5"
+    local unresolved="$6"
+
+    local world_setting chars_setting main_outline director_notes
+    world_setting=$(cat "$KNOWLEDGE_DIR/world_setting.md" 2>/dev/null || echo "")
+    chars_setting=$(cat "$KNOWLEDGE_DIR/characters.md" 2>/dev/null || echo "")
+    main_outline=$(cat "$KNOWLEDGE_DIR/main_outline.md" 2>/dev/null || echo "")
+    director_notes=$(cat "$DIRECTOR_NOTES" 2>/dev/null || echo "")
+
+    cat << USER_EOF
+## 世界观设定
+$world_setting
+
+## 角色设定
+$chars_setting
+
+## 故事大纲
+$main_outline
+
+## 导演笔记（本章专属指令，优先级最高）
+$director_notes
+
+## 当前写作状态
+当前章节：第${chapter}章
+主角：${protag_name}
+物理状态：${protag_state}
+位置：${protag_loc}
+
+## 近期事件
+${recent_events}
+
+## 未解决线索
+${unresolved}
+
+请根据以上设定和指令，撰写第${chapter}章的正文内容。
+USER_EOF
+}
+
+# ---------------------------------------------------------------------------
+# 调用 DeepSeek API
+# ---------------------------------------------------------------------------
+call_deepseek_api() {
+    local system_prompt="$1"
+    local user_prompt="$2"
+
+    local payload
+    payload=$(jq -n \
+        --arg model "$DEEPSEEK_MODEL" \
+        --arg system "$system_prompt" \
+        --arg user "$user_prompt" \
+        '{
+            model: $model,
+            temperature: 0.7,
+            max_tokens: 8192,
+            messages: [
+                {role: "system", content: $system},
+                {role: "user", content: $user}
+            ],
+            stream: false
+        }')
+
+    local response
+    response=$(curl -s -w "\n%{http_code}" \
+        -X POST "$DEEPSEEK_API_URL" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        --connect-timeout 30 \
+        --max-time 300)
+
+    local http_code
+    http_code=$(echo "$response" | tail -n 1)
+    local body
+    body=$(echo "$response" | sed '$d')
+
+    if [ "$http_code" != "200" ]; then
+        log_warn "API 请求失败，HTTP 状态码: $http_code"
+        echo "$body" | jq '.' 2>/dev/null || echo "$body"
+        exit 1
+    fi
+
+    echo "$body" | jq -r '.choices[0].message.content'
+}
+
+# ---------------------------------------------------------------------------
+# 保存章节
+# ---------------------------------------------------------------------------
+save_chapter() {
+    local content="$1"
+    local chapter="$2"
+    local filename
+    filename=$(printf "chapter_%04d.md" "$chapter")
+    local filepath="$DRAFTS_DIR/$filename"
+
+    mkdir -p "$DRAFTS_DIR"
+    echo "$content" > "$filepath"
+    echo "$filepath"
+}
+
+# ---------------------------------------------------------------------------
+# Git 自动化
+# ---------------------------------------------------------------------------
+git_auto_push() {
+    local filepath="$1"
+    local chapter="$2"
+
+    cd "$REPO_ROOT"
+
+    if ! git diff --quiet -- "$filepath" 2>/dev/null && \
+       ! git diff --cached --quiet -- "$filepath" 2>/dev/null; then
+        :
     else
-        echo "[INFO] 无新增变更，跳过提交。"
-    fi
-
-    echo "[INFO] 推送到 origin/${BRANCH} ..."
-    git push origin "$BRANCH"
-    echo "[INFO] 推送完成。"
-}
-
-# ---------------------------------------------------------------------------
-# Step 2 — 监控流水线，等待完成
-# ---------------------------------------------------------------------------
-monitor_pipeline() {
-    echo ""
-    echo "============================================================"
-    echo "  Step 2/5 — 嗅探 GitHub Actions 流水线状态"
-    echo "============================================================"
-
-    local attempt=0
-    local run_id=""
-
-    # 先等几秒让 Actions 触发
-    sleep 5
-
-    # 获取最新 run ID
-    while [ -z "$run_id" ] && [ $attempt -lt 5 ]; do
-        run_id=$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
-        if [ -z "$run_id" ]; then
-            echo "[INFO] 等待流水线触发... ($((attempt + 1))/5)"
-            sleep 5
-            attempt=$((attempt + 1))
+        if [ -z "$(git status --porcelain -- "$filepath" 2>/dev/null)" ]; then
+            log_info "文件无变更，跳过 Git 操作。"
+            return 0
         fi
-    done
-
-    if [ -z "$run_id" ]; then
-        echo "[ERROR] 未能获取流水线 ID，请手动检查 GitHub Actions。"
-        exit 1
     fi
 
-    echo "[INFO] 检测到流水线 Run ID: $run_id"
-    echo "       监控地址: https://github.com/yyyhgf123-netizen/yao/actions/runs/$run_id"
-
-    # 轮询等待流水线完成
-    attempt=0
-    while true; do
-        local status
-        local conclusion
-        status=$(gh run view "$run_id" --json status --jq '.status' 2>/dev/null || echo "unknown")
-        conclusion=$(gh run view "$run_id" --json conclusion --jq '.conclusion' 2>/dev/null || echo "unknown")
-
-        echo "       [$attempt] 状态: $status | 结论: $conclusion"
-
-        if [ "$status" = "completed" ]; then
-            if [ "$conclusion" = "success" ]; then
-                echo ""
-                echo "[SUCCESS] 流水线执行成功！"
-                return 0
-            else
-                echo ""
-                echo "[FAIL] 流水线执行失败 (conclusion: $conclusion)。"
-                echo "       请前往 Actions 查看详情:"
-                echo "       https://github.com/yyyhgf123-netizen/yao/actions/runs/$run_id"
-                exit 1
-            fi
-        fi
-
-        attempt=$((attempt + 1))
-        if [ $attempt -ge $MAX_POLL_ATTEMPTS ]; then
-            echo "[ERROR] 等待超时，流水线仍未完成。"
-            exit 1
-        fi
-
-        echo "       等待 ${POLL_INTERVAL}s ..."
-        sleep $POLL_INTERVAL
-    done
-}
-
-# ---------------------------------------------------------------------------
-# Step 3 — 自动合并 PR
-# ---------------------------------------------------------------------------
-auto_merge_pr() {
-    echo ""
-    echo "============================================================"
-    echo "  Step 3/5 — 查找 & 自动合并 Pull Request"
-    echo "============================================================"
-
-    local pr_list
-    pr_list=$(gh pr list --state open --label "auto-clean" --json number,title,headRefName --limit 5 2>/dev/null || true)
-
-    if [ -z "$pr_list" ] || [ "$pr_list" = "[]" ]; then
-        # 尝试按分支名查找
-        pr_list=$(gh pr list --state open --search "auto-clean" --json number,title,headRefName --limit 5 2>/dev/null || true)
-    fi
-
-    if [ -z "$pr_list" ] || [ "$pr_list" = "[]" ]; then
-        # 尝试按标题查找
-        pr_list=$(gh pr list --state open --search "[Auto-Clean]" --json number,title,headRefName --limit 5 2>/dev/null || true)
-    fi
-
-    if [ -z "$pr_list" ] || [ "$pr_list" = "[]" ]; then
-        echo "[INFO] 未找到待合并的 PR（可能清洗未产生变更，或 PR 尚未创建）。"
-        echo "       跳过合并步骤。"
-        return 0
-    fi
-
-    # 取第一个匹配的 PR
-    local pr_number
-    pr_number=$(echo "$pr_list" | gh pr list --state open --search "[Auto-Clean]" --json number --jq '.[0].number' 2>/dev/null)
-
-    if [ -z "$pr_number" ]; then
-        echo "[INFO] 无法解析 PR 编号，跳过合并。"
-        return 0
-    fi
-
-    echo "[INFO] 找到 PR #${pr_number}，正在自动 squash 合并..."
-    gh pr merge "$pr_number" --squash --delete-branch --admin 2>&1 || {
-        echo "[WARN] 自动合并失败，可能是权限或冲突问题。"
-        echo "       请手动合并: gh pr merge $pr_number --squash"
-        return 1
-    }
-
-    echo "[INFO] PR #${pr_number} 已合并。"
-}
-
-# ---------------------------------------------------------------------------
-# Step 4 — 拉取最新定稿
-# ---------------------------------------------------------------------------
-pull_latest() {
-    echo ""
-    echo "============================================================"
-    echo "  Step 4/5 — 拉取最新定稿"
-    echo "============================================================"
-
-    git pull origin "$BRANCH"
-    echo "[INFO] 本地仓库已更新至最新。"
-}
-
-# ---------------------------------------------------------------------------
-# Step 5 — 展示清洗后的定稿内容
-# ---------------------------------------------------------------------------
-show_cleaned_drafts() {
-    echo ""
-    echo "============================================================"
-    echo "  Step 5/5 — 最新定稿内容预览"
-    echo "============================================================"
-
-    local drafts_dir="01_Drafts"
-    if [ ! -d "$drafts_dir" ]; then
-        echo "[INFO] 01_Drafts 目录不存在。"
-        return 0
-    fi
-
-    local files
-    files=$(find "$drafts_dir" -name "*.md" -type f | sort)
-
-    if [ -z "$files" ]; then
-        echo "[INFO] 01_Drafts 目录下无草稿文件。"
-        return 0
-    fi
-
-    for file in $files; do
-        echo ""
-        echo "────────────────────────────────────────────────────────────"
-        echo "  📄 $file"
-        echo "────────────────────────────────────────────────────────────"
-        cat "$file"
-        echo ""
-    done
+    git add "$filepath"
+    git commit -m "feat: 自动生成第 ${chapter} 章"
+    git push origin main
+    log_info "第 ${chapter} 章已推送到远端。"
 }
 
 # =============================================================================
 # 主流程
 # =============================================================================
 main() {
-    echo ""
-    echo "╔════════════════════════════════════════════════════════════╗"
-    echo "║       📚 全自动小说写作闭环系统 v1.0                     ║"
-    echo "╚════════════════════════════════════════════════════════════╝"
-    echo ""
+    log_title "============================================================"
+    log_title "  📚 自动写作引擎 — 第 $(jq -r '.current_chapter_to_write // .current_chapter' "$STATE_FILE") 章"
+    log_title "============================================================"
 
-    check_prerequisites
-    auto_push
-    monitor_pipeline
-    auto_merge_pr
-    pull_latest
-    show_cleaned_drafts
+    load_env
+    log_info "已加载 API 密钥。"
 
-    echo "════════════════════════════════════════════════════════════"
-    echo "  ✅ 全自动闭环执行完毕。"
-    echo "════════════════════════════════════════════════════════════"
+    read_state
+    log_info "当前章节: 第 ${CHAPTER_NUM} 章"
+    log_info "主角: ${PROTAG_NAME}"
+
+    local system_prompt
+    system_prompt=$(build_system_prompt)
+
+    log_info "正在组装 User Prompt..."
+    local user_prompt
+    user_prompt=$(build_user_prompt \
+        "$CHAPTER_NUM" \
+        "$PROTAG_NAME" \
+        "$PROTAG_STATE" \
+        "$PROTAG_LOC" \
+        "$RECENT_EVENTS" \
+        "$UNRESOLVED")
+
+    log_info "正在调用 DeepSeek API 生成章节正文..."
+    local content
+    content=$(call_deepseek_api "$system_prompt" "$user_prompt")
+
+    if [ -z "$content" ]; then
+        log_warn "API 返回内容为空。"
+        exit 1
+    fi
+
+    local saved_path
+    saved_path=$(save_chapter "$content" "$CHAPTER_NUM")
+    log_info "章节已保存: $saved_path (${#content} 字符)"
+
+    log_info "正在提交并推送到 GitHub..."
+    git_auto_push "$saved_path" "$CHAPTER_NUM"
+
+    log_title "============================================================"
+    log_title "  ✅ 第 ${CHAPTER_NUM} 章自动写作完毕。"
+    log_title "============================================================"
 }
 
 main "$@"
