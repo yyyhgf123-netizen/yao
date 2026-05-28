@@ -214,10 +214,213 @@ git_auto_push() {
     log_info "第 ${chapter} 章已推送到远端。"
 }
 
-# =============================================================================
-# 主流程
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 等待清洗流水线完成并自动轮询 PR
+# ---------------------------------------------------------------------------
+poll_cleaning_pr() {
+    local max_attempts="${1:-60}"
+    local interval="${2:-30}"
+    local attempt=0
+
+    log_info "等待 GitHub Actions 清洗流水线触发..."
+    sleep 10
+
+    while [ $attempt -lt $max_attempts ]; do
+        attempt=$((attempt + 1))
+
+        local pr_list
+        pr_list=$(gh pr list --state open --search "[Auto-Clean]" --json number,headRefName --jq '.[].number' 2>/dev/null || true)
+
+        if [ -n "$pr_list" ]; then
+            local newest_pr
+            newest_pr=$(echo "$pr_list" | sort -rn | head -n 1)
+            log_info "检测到清洗 PR #${newest_pr}，流水线已完成。"
+            echo "$newest_pr"
+            return 0
+        fi
+
+        if [ $((attempt % 4)) -eq 0 ]; then
+            log_info "仍在等待清洗流水线... (${attempt}/${max_attempts})"
+        fi
+        sleep "$interval"
+    done
+
+    log_warn "等待超时，未能检测到清洗 PR。"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# 验证清洗后章节是否完整
+# ---------------------------------------------------------------------------
+verify_chapter_integrity() {
+    local filepath="$1"
+    local orig_chars="$2"
+
+    if [ ! -f "$filepath" ]; then
+        log_warn "验证失败：清洗后的文件不存在 ($filepath)"
+        return 1
+    fi
+
+    local cleaned_chars
+    cleaned_chars=$(wc -m < "$filepath" | tr -d ' ')
+
+    if [ "$cleaned_chars" -lt 50 ]; then
+        log_warn "验证失败：清洗后文件内容过短，疑似数据丢失 ($cleaned_chars 字符)"
+        return 1
+    fi
+
+    local ratio
+    ratio=$(awk "BEGIN {printf \"%.2f\", $cleaned_chars / $orig_chars}")
+
+    # 清洗后字数不应低于原文的 60%，也不应超过 200%
+    if awk "BEGIN {exit ($ratio < 0.6 || $ratio > 2.0) ? 0 : 1}"; then
+        log_warn "验证失败：清洗前后字数比例异常 (${ratio})，疑似严重改动或截断。"
+        log_warn "  清洗前: ${orig_chars} 字符"
+        log_warn "  清洗后: ${cleaned_chars} 字符"
+        return 1
+    fi
+
+    log_info "章节完整性验证通过 (比例: ${ratio}, 清洗前: ${orig_chars}, 清洗后: ${cleaned_chars})"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 获取并合并清洗后的章节到本地
+# ---------------------------------------------------------------------------
+sync_cleaned_chapters() {
+    local pr_number="$1"
+    shift
+    local files=("$@")
+
+    cd "$REPO_ROOT"
+
+    local pr_branch
+    pr_branch=$(gh pr view "$pr_number" --json headRefName --jq '.headRefName' 2>/dev/null)
+
+    if [ -z "$pr_branch" ]; then
+        log_warn "无法获取 PR #${pr_number} 的分支名。"
+        return 1
+    fi
+
+    log_info "拉取清洗分支: $pr_branch"
+
+    # 记录清洗前的字符数
+    local char_counts=()
+    local errors=0
+
+    git fetch origin "$pr_branch" 2>/dev/null || {
+        log_warn "无法拉取远端清洗分支 $pr_branch"
+        return 1
+    }
+
+    # 逐文件验证再合并
+    for file in "${files[@]}"; do
+        if [ -f "$file" ]; then
+            local orig_chars
+            orig_chars=$(wc -m < "$file" | tr -d ' ')
+
+            # 临时检出清洗版本验证
+            local cleaned_content
+            cleaned_content=$(git show "origin/$pr_branch:$file" 2>/dev/null || true)
+            local cleaned_chars
+            cleaned_chars=$(echo "$cleaned_content" | wc -m | tr -d ' ')
+
+            if [ "$cleaned_chars" -lt 50 ]; then
+                log_warn "[ERROR] $file: 清洗后内容过短 ($cleaned_chars 字符)，跳过此文件。"
+                errors=$((errors + 1))
+                continue
+            fi
+
+            local ratio
+            ratio=$(awk "BEGIN {printf \"%.2f\", $cleaned_chars / $orig_chars}")
+
+            if awk "BEGIN {exit ($ratio < 0.6 || $ratio > 2.0) ? 0 : 1}"; then
+                log_warn "[ERROR] $file: 清洗前后比例异常 (${ratio})，跳过此文件。"
+                log_warn "       清洗前 ${orig_chars} 字符 → 清洗后 ${cleaned_chars} 字符"
+                errors=$((errors + 1))
+                continue
+            fi
+
+            log_info "$file: 验证通过 (${orig_chars} → ${cleaned_chars}, 比例 ${ratio})"
+        fi
+        char_counts+=("$file:$orig_chars")
+    done
+
+    if [ "$errors" -gt 0 ]; then
+        log_warn "============================================================"
+        log_warn "  ⚠️  ${errors} 个文件未通过验证，拒绝自动合并。"
+        log_warn "  请前往 GitHub PR #${pr_number} 手动审查。"
+        log_warn "============================================================"
+        return 1
+    fi
+
+    # 所有文件验证通过，执行合并
+    local merge_branch="sync-cleaned-${pr_number}"
+    git checkout -b "$merge_branch" 2>/dev/null
+    git merge "origin/$pr_branch" --no-edit -m "merge: auto-clean sync from PR #${pr_number}" || {
+        log_warn "合并冲突，请手动处理。"
+        git merge --abort 2>/dev/null || true
+        git checkout main 2>/dev/null || true
+        git branch -D "$merge_branch" 2>/dev/null || true
+        return 1
+    }
+
+    git checkout main 2>/dev/null || true
+    git merge "$merge_branch" --no-edit || true
+    git branch -D "$merge_branch" 2>/dev/null || true
+
+    log_info "清洗内容已合并到本地。"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 主流程 — 选项：write（写作）或 sync（回接清洗内容）
+# ---------------------------------------------------------------------------
 main() {
+    local mode="${1:-write}"
+
+    cd "$REPO_ROOT"
+
+    if [ "$mode" = "sync" ] || [ "$mode" = "full" ]; then
+        log_title "============================================================"
+        log_title "  🔄 清洗回接模式 — 等待 Actions → 验证 → 合并到本地"
+        log_title "============================================================"
+
+        local pr_number
+        pr_number=$(poll_cleaning_pr 60 30)
+        if [ -z "$pr_number" ]; then
+            exit 1
+        fi
+
+        # 检测 PR 中改动的章节文件
+        local pr_files
+        pr_files=$(gh pr view "$pr_number" --json files --jq '.files[].path' 2>/dev/null | grep '^novel_workspace/02_Drafts/.*\.md$' || true)
+
+        if [ -z "$pr_files" ]; then
+            log_warn "未在 PR 中检测到章节文件变更。"
+            exit 1
+        fi
+
+        local files_array=()
+        while IFS= read -r f; do
+            [ -n "$f" ] && files_array+=("$f")
+        done <<< "$pr_files"
+
+        if sync_cleaned_chapters "$pr_number" "${files_array[@]}"; then
+            log_info "正在推送清洗结果到远端..."
+            git push origin main
+            log_title "============================================================"
+            log_title "  ✅ 清洗内容已回接并推送。"
+            log_title "============================================================"
+        else
+            log_warn "回接过程中出现错误，请手动检查。"
+            exit 1
+        fi
+
+        return 0
+    fi
+
+    # ---- 默认：写作模式 ----
     log_title "============================================================"
     log_title "  📚 自动写作引擎 — 第 $(jq -r '.current_chapter_to_write // .current_chapter' "$STATE_FILE") 章"
     log_title "============================================================"
