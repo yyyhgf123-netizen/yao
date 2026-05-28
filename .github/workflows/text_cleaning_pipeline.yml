@@ -87,11 +87,11 @@ jobs:
 
           # 使用 git diff 获取 HEAD 与前一提交之间变更的 .md 文件
           # 若 push 前没有父提交（如首次提交），则回退至与 origin/main 的差异
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD -- "01_Drafts/**/*.md" 2>/dev/null)
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep '^01_Drafts/.*\.md$' || true)
 
           if [ -z "$CHANGED_FILES" ]; then
             echo "[INFO] 未检测到 HEAD~1 差异，尝试与默认分支对比..."
-            CHANGED_FILES=$(git diff --name-only origin/main...HEAD -- "01_Drafts/**/*.md" 2>/dev/null)
+            CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep '^01_Drafts/.*\.md$' || true)
           fi
 
           if [ -z "$CHANGED_FILES" ]; then
