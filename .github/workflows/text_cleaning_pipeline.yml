@@ -9,7 +9,7 @@
 #   Step 2 → 配置 Python 环境并安装依赖
 #   Step 3 → 自动识别变更草稿 → 调用 clean_text.py → 逐章清洗
 #            （脚本内执行：YAML 解析 → System Prompt 组装 → DeepSeek API 调用 → 覆写）
-#   Step 4 → [逻辑占位] 自动创建 Pull Request 供人工审查
+#   Step 4 → 自动提交清洗变更 → 创建 Pull Request 供人工审查
 #
 # 核心脚本：.github/scripts/clean_text.py
 # 依赖：pyyaml, requests
@@ -148,26 +148,30 @@ jobs:
       # -------------------------------------------------------------------
       # 6. AUTOMATED PR — 自动创建 Pull Request 供人工审查
       # -------------------------------------------------------------------
-      # 逻辑占位：将 LLM 返回的清洗后草稿写入仓库中的一个隔离分支，
-      # 并自动创建 Pull Request，等待人工审查与合并决策。
+      # 基于 peter-evans/create-pull-request 自动提交清洗后的变更并创建 PR。
       #
-      # 流程细则：
-      #   a) 基于当前 HEAD 创建新分支（例如 cleaning/YYYYMMDD-HHMMSS）
-      #   b) 将 ./cleaned_drafts/ 下的清洗结果覆盖写入 01_Drafts/ 对应文件
-      #   c) 提交变更，附上本次清洗的变更摘要（触发黑名单的条目数量等）
-      #   d) 在 PR 正文中附加清洗报告摘要（命中规则统计、需人工复核的条目清单）
-      #   e) 创建 Pull Request，目标分支为触发本次 push 的源分支
+      # 工作原理：
+      #   - Step 5 中 clean_text.py 已对草稿文件原地覆写
+      #   - 此 Action 自动检测工作区的所有文件变更（即清洗产生的差异）
+      #   - 将变更推送到一个独立的分支（auto-clean-<run_id>）
+      #   - 向源分支发起 Pull Request，等待人工审查合并
       #
-      # 实现方式：通过 gh CLI 或 GitHub REST API 完成分支创建、提交与 PR 发起。
+      # 若清洗未产生任何文件变更（模型返回文本与原文完全一致），
+      # 则 Action 自动跳过 PR 创建，不会产生空 PR。
       # -------------------------------------------------------------------
       - name: "Create Automated Pull Request"
-        run: |
-          # ================================================================
-          # [ 逻辑占位 ]  自动 PR 创建阶段
-          # ================================================================
-          # TODO: 生成清洗分支名（时间戳 + 短哈希）
-          # TODO: 将清洗后文本写入 01_Drafts/ 对应路径
-          # TODO: git add / git commit / git push 清洗分支
-          # TODO: 生成清洗报告摘要（命中规则条目数量、需人工复核清单）
-          # TODO: 调用 gh pr create 创建 Pull Request
-          echo ">>> Automated PR placeholder — creating branch, committing cleaned drafts, opening PR for review"
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: auto-clean novel text"
+          title: "[Auto-Clean] 章节文本规范化重构"
+          body: |
+            系统已依照 `02_Config` 中的规则对草稿进行了净化，请人工复核。
+
+            **清洗依据**：
+            - `blacklist.yaml` — AI 色彩词汇 & 陈词滥调过滤
+            - `characters.yaml` — 角色语言风格 & 行为边界校验
+            - `format.yaml` — 排版规范 & 英式拼写纠正
+
+            > 请逐条审查 diff，确认无误后合并。
+          branch: "auto-clean-${{ github.run_id }}"
+          delete-branch: true
