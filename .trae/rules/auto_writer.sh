@@ -39,29 +39,52 @@ load_env() {
 }
 
 # ---------------------------------------------------------------------------
+# JSON 解析辅助（用 Python 替代 jq）
+# ---------------------------------------------------------------------------
+json_get() {
+    local file="$1" key="$2" default="${3:-}"
+    python -c "
+import json,sys
+with open('$file', encoding='utf-8') as f:
+    data = json.load(f)
+keys = '$key'.split(' // ')
+for k in keys:
+    try:
+        parts = k.split('.')
+        val = data
+        for p in parts: val = val[p]
+        print(val)
+        break
+    except (KeyError, TypeError):
+        continue
+else:
+    print('$default')
+" 2>/dev/null || echo "$default"
+}
+
+json_get_arr() {
+    local file="$1" key="$2"
+    python -c "
+import json
+with open('$file', encoding='utf-8') as f:
+    data = json.load(f)
+for p in '$key'.split('.'):
+    data = data[p]
+if isinstance(data, list):
+    for item in data: print(item)
+" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
 # 读取当前写作状态
 # ---------------------------------------------------------------------------
 read_state() {
-    local chapter
-    local protag_name
-    local protag_state
-    local protag_loc
-    local recent_events
-    local unresolved
-
-    chapter=$(jq -r '.current_chapter_to_write // .current_chapter' "$STATE_FILE")
-    protag_name=$(jq -r '.protagonist.name' "$STATE_FILE")
-    protag_state=$(jq -r '.protagonist.physical_state' "$STATE_FILE")
-    protag_loc=$(jq -r '.protagonist.location' "$STATE_FILE")
-    recent_events=$(jq -r '.recent_events | join("\n")' "$STATE_FILE")
-    unresolved=$(jq -r '.unresolved_threads | join("\n")' "$STATE_FILE")
-
-    CHAPTER_NUM="$chapter"
-    PROTAG_NAME="$protag_name"
-    PROTAG_STATE="$protag_state"
-    PROTAG_LOC="$protag_loc"
-    RECENT_EVENTS="$recent_events"
-    UNRESOLVED="$unresolved"
+    CHAPTER_NUM=$(json_get "$STATE_FILE" "current_chapter_to_write // current_chapter" "1")
+    PROTAG_NAME=$(json_get "$STATE_FILE" "protagonist.name" "未知")
+    PROTAG_STATE=$(json_get "$STATE_FILE" "protagonist.physical_state" "")
+    PROTAG_LOC=$(json_get "$STATE_FILE" "protagonist.location" "")
+    RECENT_EVENTS=$(json_get_arr "$STATE_FILE" "recent_events")
+    UNRESOLVED=$(json_get_arr "$STATE_FILE" "unresolved_threads")
 }
 
 # ---------------------------------------------------------------------------
@@ -123,29 +146,41 @@ USER_EOF
 call_deepseek_api() {
     local system_prompt="$1"
     local user_prompt="$2"
+    local tmp_dir="$REPO_ROOT/.trae"
+    mkdir -p "$tmp_dir"
 
-    local payload
-    payload=$(jq -n \
-        --arg model "$DEEPSEEK_MODEL" \
-        --arg system "$system_prompt" \
-        --arg user "$user_prompt" \
-        '{
-            model: $model,
-            temperature: 0.7,
-            max_tokens: 8192,
-            messages: [
-                {role: "system", content: $system},
-                {role: "user", content: $user}
-            ],
-            stream: false
-        }')
+    printf '%s' "$system_prompt" > "$tmp_dir/tmp_sys.txt"
+    printf '%s' "$user_prompt"  > "$tmp_dir/tmp_usr.txt"
+
+    python -c "
+import json
+with open('$tmp_dir/tmp_sys.txt', encoding='utf-8') as f: sp = f.read()
+with open('$tmp_dir/tmp_usr.txt', encoding='utf-8') as f: up = f.read()
+payload = {
+    'model': '$DEEPSEEK_MODEL',
+    'temperature': 0.7,
+    'max_tokens': 8192,
+    'messages': [
+        {'role': 'system', 'content': sp},
+        {'role': 'user', 'content': up}
+    ],
+    'stream': False
+}
+with open('$tmp_dir/tmp_payload.json', 'w', encoding='utf-8') as f:
+    json.dump(payload, f, ensure_ascii=False)
+" 2>/dev/null
+
+    if [ ! -f "$tmp_dir/tmp_payload.json" ]; then
+        log_warn "无法构建 API 请求载荷，请确认 Python 已安装。"
+        exit 1
+    fi
 
     local response
     response=$(curl -s -w "\n%{http_code}" \
         -X POST "$DEEPSEEK_API_URL" \
         -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "$payload" \
+        -d @"$tmp_dir/tmp_payload.json" \
         --connect-timeout 30 \
         --max-time 300)
 
@@ -154,13 +189,19 @@ call_deepseek_api() {
     local body
     body=$(echo "$response" | sed '$d')
 
+    rm -f "$tmp_dir/tmp_payload.json" "$tmp_dir/tmp_sys.txt" "$tmp_dir/tmp_usr.txt"
+
     if [ "$http_code" != "200" ]; then
         log_warn "API 请求失败，HTTP 状态码: $http_code"
-        echo "$body" | jq '.' 2>/dev/null || echo "$body"
+        echo "$body"
         exit 1
     fi
 
-    echo "$body" | jq -r '.choices[0].message.content'
+    echo "$body" | python -c "
+import json, sys
+data = json.load(sys.stdin)
+print(data['choices'][0]['message']['content'])
+" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -411,7 +452,7 @@ main() {
 
     # ---- 默认：写作模式 ----
     log_title "============================================================"
-    log_title "  📚 自动写作引擎 — 第 $(jq -r '.current_chapter_to_write // .current_chapter' "$STATE_FILE") 章"
+    log_title "  📚 自动写作引擎 — 第 $(python -c "import json;f=open('$STATE_FILE',encoding='utf-8');d=json.load(f);print(d.get('current_chapter_to_write',d.get('current_chapter',1)))") 章"
     log_title "============================================================"
 
     load_env
