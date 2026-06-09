@@ -1,8 +1,30 @@
 $ErrorActionPreference = "Stop"
-$env:DEEPSEEK_API_KEY = 'REDACTED_API_KEY'
 
 $root = $PSScriptRoot
 $ws   = Join-Path $root "..\..\novel_workspace"
+
+$envFile = Join-Path $ws "scripts\.env"
+if (Test-Path $envFile) {
+    Get-Content $envFile | ForEach-Object {
+        if ($_ -match '^\s*([A-Z_]+)\s*=\s*(.+)\s*$' -and $matches[1] -ne '') {
+            Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+        }
+    }
+} else {
+    $homeEnv = Join-Path $env:USERPROFILE "deepseek.env"
+    if (Test-Path $homeEnv) {
+        Get-Content $homeEnv | ForEach-Object {
+            if ($_ -match '^\s*([A-Z_]+)\s*=\s*(.+)\s*$' -and $matches[1] -ne '') {
+                Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+            }
+        }
+    }
+}
+
+if (-not $env:DEEPSEEK_API_KEY) {
+    Write-Host "ERROR: DEEPSEEK_API_KEY not set. Please create novel_workspace/scripts/.env with: DEEPSEEK_API_KEY=your-key"
+    exit 1
+}
 
 Write-Host "=== Auto Writer Engine ==="
 
