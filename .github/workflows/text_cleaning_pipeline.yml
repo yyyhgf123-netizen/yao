@@ -1,0 +1,158 @@
+# =============================================================================
+# Text Cleaning Pipeline — 远端异步文本清洗流水线
+# =============================================================================
+# 触发条件：当 novel_workspace/02_Drafts 目录下的 .md 草稿被 push 时自动执行。
+#           当 02_Config 目录下的 .yaml 配置被修改时也会触发（规则变更需重新清洗）。
+#
+# 流水线职责：
+#   Step 1 → Checkout 仓库完整历史
+#   Step 2 → 配置 Python 环境并安装依赖
+#   Step 3 → 自动识别变更草稿 → 调用 clean_text.py → 逐章清洗
+#            （脚本内执行：YAML 解析 → System Prompt 组装 → DeepSeek API 调用 → 覆写）
+#   Step 4 → 自动提交清洗变更 → 创建 Pull Request 供人工审查
+#
+# 核心脚本：.github/scripts/clean_text.py
+# 依赖：pyyaml, requests
+# Secret：需在 GitHub 仓库 Settings 中配置 DEEPSEEK_API_KEY
+# =============================================================================
+
+name: Text Cleaning Pipeline
+
+# ---------------------------------------------------------------------------
+# 1. TRIGGER — 监听 novel_workspace/02_Drafts 目录下 Markdown 文件的 push 事件
+# ---------------------------------------------------------------------------
+on:
+  push:
+    paths:
+      - "novel_workspace/02_Drafts/**/*.md"
+      - "02_Config/**/*.yaml"
+
+# ---------------------------------------------------------------------------
+# 2. ENVIRONMENT — 声明运行容器
+# ---------------------------------------------------------------------------
+jobs:
+  text-cleaning:
+    name: "Draft Cleaning & Review"
+    runs-on: ubuntu-latest
+
+    # ---- 权限声明：允许流水线创建 Pull Request ----
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+
+      # -------------------------------------------------------------------
+      # 3. CHECKOUT — 拉取仓库最新代码
+      # -------------------------------------------------------------------
+      # 使用完整历史记录以便后续步骤能正确计算变更差异。
+      # -------------------------------------------------------------------
+      - name: "Checkout Repository"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      # -------------------------------------------------------------------
+      # 4. PYTHON ENVIRONMENT — 安装依赖与配置运行环境
+      # -------------------------------------------------------------------
+      # 安装 clean_text.py 所需的 Python 依赖（pyyaml + requests）。
+      # -------------------------------------------------------------------
+      - name: "Setup Python & Install Dependencies"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Install Python Requirements"
+        run: pip install -r .github/scripts/requirements.txt
+
+      # -------------------------------------------------------------------
+      # 5. DETECT & CLEAN — 自动识别变更草稿并逐章执行清洗
+      # -------------------------------------------------------------------
+      # 通过 git diff 识别本次 push 中发生变更的 Markdown 草稿文件。
+      # 对每一篇草稿依次调用 clean_text.py 执行清洗。
+      #
+      # 容错策略：
+      #   - 单章清洗失败仅记录错误，继续处理后续章节，不中断整个流水线
+      #   - 所有章节处理完毕后，汇总成功/失败计数
+      #   - 若全部章节均失败，则设置 exit code 为 1 以标记流水线状态
+      #
+      # 环境变量：
+      #   DEEPSEEK_API_KEY — 从 GitHub Actions Secrets 注入，不暴露于日志
+      # -------------------------------------------------------------------
+      - name: "Detect Changed Drafts & Run Cleaning"
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          echo "=== 检测本次 push 变更的 Markdown 草稿 ==="
+
+          # 使用 git diff 获取 HEAD 与前一提交之间变更的 .md 文件
+          # 若 push 前没有父提交（如首次提交），则回退至与 origin/main 的差异
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep '^novel_workspace/02_Drafts/.*\.md$' || true)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "[INFO] 未检测到 HEAD~1 差异，尝试与默认分支对比..."
+            CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep '^novel_workspace/02_Drafts/.*\.md$' || true)
+          fi
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "[INFO] 未检测到变更的 .md 草稿文件，流水线结束。"
+            exit 0
+          fi
+
+          echo "以下文件将被清洗："
+          echo "$CHANGED_FILES"
+          echo ""
+
+          # 统计变量
+          TOTAL=0
+          SUCCESS=0
+          FAILED=0
+          FAILED_FILES=""
+
+          # 逐章清洗
+          while IFS= read -r DRAFT_FILE; do
+            [ -z "$DRAFT_FILE" ] && continue
+            TOTAL=$((TOTAL + 1))
+            echo "------------------------------------------------------------"
+            echo ">>> 清洗 [$TOTAL] : $DRAFT_FILE"
+            echo ""
+
+            if python .github/scripts/clean_text.py "$DRAFT_FILE"; then
+              SUCCESS=$((SUCCESS + 1))
+              echo ">>> [$DRAFT_FILE] 清洗成功。"
+            else
+              FAILED=$((FAILED + 1))
+              FAILED_FILES="$FAILED_FILES\n  - $DRAFT_FILE"
+              echo ">>> [ERROR] [$DRAFT_FILE] 清洗失败，已跳过。详细错误信息见上方日志。"
+            fi
+            echo ""
+          done <<< "$CHANGED_FILES"
+
+          # 汇总报告
+          echo "============================================================"
+          echo "  清洗汇总: 共 $TOTAL 章 | 成功 $SUCCESS | 失败 $FAILED"
+          echo "============================================================"
+
+          if [ $FAILED -gt 0 ]; then
+            echo "[WARN] 以下章节清洗失败:"
+            echo -e "$FAILED_FILES"
+          fi
+
+          if [ $FAILED -eq $TOTAL ] && [ $TOTAL -gt 0 ]; then
+            echo "[FATAL] 所有章节均清洗失败。"
+            exit 1
+          fi
+
+          echo "[INFO] 清洗阶段结束。"
+
+      # -------------------------------------------------------------------
+      # 6. AUTOMATED PR — 自动创建 Pull Request 供人工审查
+      # -------------------------------------------------------------------
+      - name: "Create Automated Pull Request"
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: auto-clean novel text"
+          title: "[Auto-Clean] 章节文本规范化重构"
+          body: "系统已依照 02_Config 中的规则对草稿进行了净化，请人工复核。"
+          branch: "auto-clean-${{ github.run_id }}"
+          delete-branch: true

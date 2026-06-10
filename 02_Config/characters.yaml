@@ -1,0 +1,89 @@
+# ============================================================
+# 核心角色设定 — 控制行为边界、语言风格与互动逻辑
+# ============================================================
+
+yun_chu:
+  full_name: "云初"
+  role: "主角"
+  age: 17
+  archetype: "内敛观察者"
+  core_traits:
+    - 心思细腻
+    - 慢热但坚定
+    - 不善言辞却洞察力强
+
+  speech_style:
+    sentence_length: "偏短，常用省略与断句"
+    tone: "平实、偶尔自嘲，极少使用感叹号"
+    habitual_phrases:
+      - "嗯。"
+      - "没什么。"
+      - "也不是。"
+    dialogue_ratio: "对白中更倾向于倾听，回答时回避直抒胸臆"
+    forbidden_patterns:
+      - 长段抒情独白
+      - 刻意煽情的排比句
+      - 未经铺垫的情绪爆发
+
+  behavioural_boundaries:
+    must_not:
+      - 主动发起肢体接触（除非剧情关键转折且附带充分动机）
+      - 在冲突中首先使用人身攻击式语言
+      - 对权威（教师、长辈）高声顶撞
+    soft_limits:
+      - 在公共场合流露强烈情绪——允许，但事后必须有自我审视片段
+      - 向他人寻求帮助——允许，但需伴随犹豫与措辞的反复推敲
+
+  interaction_rules:
+    with_xu_zhuo:
+      dynamic: "缓慢拉锯，表面疏离、底层暗涌"
+      phase_one:
+        trigger: "初次接触为被动模式——由许卓先行越界"
+        response: "保持距离，回应简短，但偶有不易察觉的留意"
+      phase_two:
+        trigger: "经历一次双方都无法置身事外的共同事件"
+        response: "对话逐渐出现非功利性质的停留与追问"
+      escalation_trigger: "一方无意中触碰到对方的核心脆弱面"
+
+xu_zhuo:
+  full_name: "许卓"
+  role: "主角 / 对手-盟友"
+  age: 17
+  archetype: "锋芒外露的问题解决者"
+  core_traits:
+    - 聪明但缺乏耐心
+    - 行动先于思考
+    - 表面上不在乎，实则过度负责
+
+  speech_style:
+    sentence_length: "短促有力，偶尔连珠炮式追问"
+    tone: "直接、略带讽刺，但讽刺背后通常是关心"
+    habitual_phrases:
+      - "关你什么事。"
+      - "行了，我来。"
+      - "你管那么多干嘛。"
+    dialogue_ratio: "对话中占据主动，习惯用问题替代陈述"
+    forbidden_patterns:
+      - 直白的情感告白（必须通过行动侧面表达）
+      - 无缘由的温柔语气
+      - 长篇大论的说教
+
+  behavioural_boundaries:
+    must_not:
+      - 在冷静状态下主动示弱
+      - 无理由地顺从他人安排
+      - 在公共场合长时间沉默（沉默代表有事发生）
+    soft_limits:
+      - 冲动的决定——允许，但必须有后续承担代价的描写
+      - 单方面帮助云初——允许，但云初需察觉或以其他方式回应
+
+  interaction_rules:
+    with_yun_chu:
+      dynamic: "主动靠近但嘴上不认，试探-撤退-再试探"
+      phase_one:
+        trigger: "无意间注意到云初的某种不协调——她表现出的平静与处境之间的落差"
+        response: "以看似随意的方式介入对方的日常半径"
+      phase_two:
+        trigger: "发现云初在某一刻卸下惯常的防御姿态"
+        response: "进攻性减弱，开始出现非刻意的等待与观察"
+      escalation_trigger: "云初主动跨过安全距离，对他的世界产生直接参与"

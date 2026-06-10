@@ -1,0 +1,42 @@
+# ============================================================
+# 排版与拼写规范 — 输出格式化阶段的统一公约
+# ============================================================
+
+spacing_rules:
+  paragraph:
+    indent: false
+    line_spacing: "段落之间空一行，段内不空行"
+    max_consecutive_single_line_paragraphs: 3
+  dialogue:
+    format: "使用中文引号 「 」 包裹对话内容"
+    speaker_attribution: "对话与动作描写同行时不换行，用句号分隔"
+    max_dialogue_lines_without_attribution: 4
+    inner_monologue:
+      format: "使用 『 』 包裹内心独白"
+    phone_text:
+      format: "使用 【 】 包裹短信 / 消息内容"
+  scene_break:
+    marker: "* * *"
+    spacing: "上下各空一行"
+  whitespace:
+    no_consecutive_blank_lines: 2
+    trailing_whitespace: "remove"
+
+spelling_conventions:
+  standard: "British English"
+  effective_scope: "all English output in any context"
+  examples:
+    colour: "not color"
+    behaviour: "not behavior"
+    realise: "not realize"
+    centre: "not center"
+    favour: "not favor"
+    honour: "not honor"
+    organise: "not organize"
+    recognise: "not recognize"
+    defence: "not defense"
+    licence: "not license (noun)"
+    practise: "not practice (verb)"
+    grey: "not gray"
+    programme: "not program (except computing context)"
+    theatre: "not theater"
